@@ -1,0 +1,10 @@
+rep,question_id,model,temperature,status,latency_s,prompt_tokens,output_tokens,thought_tokens,total_tokens,output_tok_per_s,answer_chars
+1,curso,gemini-3.5-flash-lite,0,ok,2.671,21,550,0,571,205.9,1029
+1,curso,gemini-3.5-flash-lite,1,ok,2.604,21,541,0,562,207.8,1064
+1,curso,gemini-3.5-flash-lite,2,ok,3.133,21,699,0,720,223.1,1289
+2,curso,gemini-3.5-flash-lite,0,ok,2.437,21,496,0,517,203.5,935
+2,curso,gemini-3.5-flash-lite,1,ok,2.709,21,679,0,700,250.7,1296
+2,curso,gemini-3.5-flash-lite,2,ok,3.242,21,691,0,712,213.1,1284
+3,curso,gemini-3.5-flash-lite,0,ok,3.26,21,716,0,737,219.6,1319
+3,curso,gemini-3.5-flash-lite,1,ok,3.16,21,676,0,697,213.9,1208
+3,curso,gemini-3.5-flash-lite,2,ok,2.126,21,407,0,428,191.4,764
