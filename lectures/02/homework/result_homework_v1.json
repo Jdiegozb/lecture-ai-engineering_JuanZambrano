@@ -1,0 +1,329 @@
+{
+  "config": {
+    "base_model": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "seed": 42,
+    "variant": "v1",
+    "num_train_epochs": 10,
+    "warmup_steps": 6,
+    "lr": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_seq_len": 512,
+    "max_new_tokens": 192,
+    "gen": {
+      "do_sample": false
+    }
+  },
+  "versions": {
+    "transformers": "5.18.0",
+    "peft": "0.21.1",
+    "trl": "1.14.2",
+    "torch": "2.14.1+cu130"
+  },
+  "method": "LoRA（量子化なし）",
+  "data": {
+    "train_file": "glossary_sft.jsonl",
+    "n_train": 130,
+    "n_eval": 55,
+    "n_terms": 65
+  },
+  "training": {
+    "seconds": 382,
+    "steps": 170,
+    "losses": [
+      [
+        10,
+        3.2538
+      ],
+      [
+        20,
+        2.3972
+      ],
+      [
+        30,
+        1.6618
+      ],
+      [
+        40,
+        1.191
+      ],
+      [
+        50,
+        0.7459
+      ],
+      [
+        60,
+        0.4085
+      ],
+      [
+        70,
+        0.2673
+      ],
+      [
+        80,
+        0.1695
+      ],
+      [
+        90,
+        0.1569
+      ],
+      [
+        100,
+        0.1268
+      ],
+      [
+        110,
+        0.1038
+      ],
+      [
+        120,
+        0.0972
+      ],
+      [
+        130,
+        0.092
+      ],
+      [
+        140,
+        0.0888
+      ],
+      [
+        150,
+        0.0849
+      ],
+      [
+        160,
+        0.0861
+      ],
+      [
+        170,
+        0.0816
+      ]
+    ]
+  },
+  "summaries": {
+    "search": {
+      "headline": {
+        "acc_seen (memorización, con fuga)": 1.0,
+        "acc_unseen (reworded+alias+natural)": 0.903,
+        "acc_unseen_general": 1.0,
+        "acc_unseen_course": 0.8,
+        "over_refusal_unseen": 0.097,
+        "fictional_refusal (↑ mejor)": 0.167,
+        "fictional_hallucination (↓ mejor)": 0.833,
+        "contamination_controls (↓ mejor)": 0.0
+      },
+      "by_category": {
+        "seen": {
+          "n": 8,
+          "correct": 8,
+          "mean_keyword_ratio": 1.0,
+          "mean_ref_f1": 1.0
+        },
+        "reworded": {
+          "n": 16,
+          "correct": 16,
+          "mean_keyword_ratio": 1.0,
+          "mean_ref_f1": 1.0
+        },
+        "alias": {
+          "n": 10,
+          "correct": 10,
+          "mean_keyword_ratio": 1.0,
+          "mean_ref_f1": 1.0
+        },
+        "natural": {
+          "n": 5,
+          "correct": 2,
+          "refused": 3,
+          "mean_keyword_ratio": 0.4,
+          "mean_ref_f1": 0.403
+        },
+        "fictional": {
+          "n": 6,
+          "hallucinated": 5,
+          "refused": 1
+        },
+        "absent_real": {
+          "n": 6,
+          "refused": 6
+        },
+        "general": {
+          "n": 4,
+          "refused": 4
+        }
+      },
+      "seconds": 0.3
+    },
+    "before": {
+      "headline": {
+        "acc_seen (memorización, con fuga)": 0.125,
+        "acc_unseen (reworded+alias+natural)": 0.097,
+        "acc_unseen_general": 0.188,
+        "acc_unseen_course": 0.0,
+        "over_refusal_unseen": 0.0,
+        "fictional_refusal (↑ mejor)": 0.0,
+        "fictional_hallucination (↓ mejor)": 1.0,
+        "contamination_controls (↓ mejor)": 0.0
+      },
+      "by_category": {
+        "seen": {
+          "n": 8,
+          "correct": 1,
+          "partial": 2,
+          "wrong": 5,
+          "mean_keyword_ratio": 0.219,
+          "mean_ref_f1": 0.053
+        },
+        "reworded": {
+          "n": 16,
+          "correct": 2,
+          "partial": 3,
+          "wrong": 11,
+          "mean_keyword_ratio": 0.219,
+          "mean_ref_f1": 0.058
+        },
+        "alias": {
+          "n": 10,
+          "correct": 1,
+          "partial": 4,
+          "wrong": 5,
+          "mean_keyword_ratio": 0.3,
+          "mean_ref_f1": 0.054
+        },
+        "natural": {
+          "n": 5,
+          "partial": 3,
+          "wrong": 2,
+          "mean_keyword_ratio": 0.25,
+          "mean_ref_f1": 0.079
+        },
+        "fictional": {
+          "n": 6,
+          "hallucinated": 6
+        },
+        "absent_real": {
+          "n": 6,
+          "ok": 6
+        },
+        "general": {
+          "n": 4,
+          "ok": 4
+        }
+      },
+      "seconds": 491.1
+    },
+    "rag": {
+      "headline": {
+        "acc_seen (memorización, con fuga)": 0.875,
+        "acc_unseen (reworded+alias+natural)": 0.774,
+        "acc_unseen_general": 0.938,
+        "acc_unseen_course": 0.6,
+        "over_refusal_unseen": 0.0,
+        "fictional_refusal (↑ mejor)": 0.0,
+        "fictional_hallucination (↓ mejor)": 1.0,
+        "contamination_controls (↓ mejor)": 0.0
+      },
+      "by_category": {
+        "seen": {
+          "n": 8,
+          "correct": 7,
+          "wrong": 1,
+          "mean_keyword_ratio": 0.875,
+          "mean_ref_f1": 0.691
+        },
+        "reworded": {
+          "n": 16,
+          "correct": 15,
+          "wrong": 1,
+          "mean_keyword_ratio": 0.938,
+          "mean_ref_f1": 0.597
+        },
+        "alias": {
+          "n": 10,
+          "correct": 9,
+          "wrong": 1,
+          "mean_keyword_ratio": 0.9,
+          "mean_ref_f1": 0.682
+        },
+        "natural": {
+          "n": 5,
+          "partial": 4,
+          "wrong": 1,
+          "mean_keyword_ratio": 0.45,
+          "mean_ref_f1": 0.337
+        },
+        "fictional": {
+          "n": 6,
+          "hallucinated": 6
+        },
+        "absent_real": {
+          "n": 6,
+          "ok": 6
+        },
+        "general": {
+          "n": 4,
+          "ok": 4
+        }
+      },
+      "seconds": 185.5
+    },
+    "after": {
+      "headline": {
+        "acc_seen (memorización, con fuga)": 1.0,
+        "acc_unseen (reworded+alias+natural)": 0.742,
+        "acc_unseen_general": 0.812,
+        "acc_unseen_course": 0.667,
+        "over_refusal_unseen": 0.0,
+        "fictional_refusal (↑ mejor)": 0.0,
+        "fictional_hallucination (↓ mejor)": 1.0,
+        "contamination_controls (↓ mejor)": 0.0
+      },
+      "by_category": {
+        "seen": {
+          "n": 8,
+          "correct": 8,
+          "mean_keyword_ratio": 1.0,
+          "mean_ref_f1": 1.0
+        },
+        "reworded": {
+          "n": 16,
+          "correct": 16,
+          "mean_keyword_ratio": 1.0,
+          "mean_ref_f1": 1.0
+        },
+        "alias": {
+          "n": 10,
+          "correct": 5,
+          "partial": 1,
+          "wrong": 4,
+          "mean_keyword_ratio": 0.55,
+          "mean_ref_f1": 0.593
+        },
+        "natural": {
+          "n": 5,
+          "correct": 2,
+          "partial": 3,
+          "mean_keyword_ratio": 0.7,
+          "mean_ref_f1": 0.381
+        },
+        "fictional": {
+          "n": 6,
+          "hallucinated": 6
+        },
+        "absent_real": {
+          "n": 6,
+          "ok": 6
+        },
+        "general": {
+          "n": 4,
+          "ok": 4
+        }
+      },
+      "seconds": 196.7
+    }
+  },
+  "regressed": [],
+  "executed_training_myself": true
+}
