@@ -1,0 +1,511 @@
+diff --git a/app/agent.py b/app/agent.py
+index b3d0b5d..1366797 100644
+--- a/app/agent.py
++++ b/app/agent.py
+@@ -5,6 +5,7 @@
+     uv run python -m app.agent --trace "LoRAとQLoRAの違いは？"   # ツール呼び出しを表示
+     uv run python -m app.agent --mcp --trace "LoRAとは？"        # 第5回: ツールを MCP サーバーから受け取る
+     uv run python -m app.agent --mcp --list-tools               # 第5回: モデルに見えるツール一覧（APIキー不要）
++    uv run python -m app.agent --trace "今日学んだことを学習ログに保存して: ..."  # 宿題（実装）: 保存前に承認を求める
+ 
+ エージェント = モデル + ループ + ツール。
+ モデルは tools.py の関数を「ツール」として呼び出し、その結果を見て回答を作る。
+@@ -14,9 +15,12 @@
+ import argparse
+ import inspect
+ import json
++import sys
++from collections.abc import Callable
++from dataclasses import dataclass
+ from pathlib import Path
+ 
+-from pydantic_ai import Agent
++from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
+ from pydantic_ai.exceptions import ModelHTTPError
+ from fastmcp import Client
+ from pydantic_ai.mcp import MCPToolset, StdioTransport
+@@ -35,14 +39,21 @@ INSTRUCTIONS = """\
+ - 用語集に見つからないことは、推測で断定せず「用語集にはない」と伝える。
+ - 回答の最後に、関係する回（第N回）を示す。
+ - 宿題の答えそのものは書かず、考え方のヒントで導く。
++- 確認問題を求められたら make_quiz を使う。
++- 学習の記録の保存をはっきり頼まれたときだけ save_learning_log を使う。保存が承認されなかったとき（拒否・エラー）は、保存したと言わない。
+ """
+ 
+ # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
+-agent = Agent(instructions=INSTRUCTIONS)
++# output_type に DeferredToolRequests を加える: 承認待ちで止まったとき、その一覧が result.output になる
++agent = Agent(instructions=INSTRUCTIONS, output_type=[str, DeferredToolRequests])
+ agent.tool_plain(tools.search_glossary)
+ agent.tool_plain(tools.get_lecture_summary)
++agent.tool_plain(tools.make_quiz)  # 第3回 演習
++# 宿題（実装）: 保存は取り消しにくいので、実行前に人の承認を挟む（human-in-the-loop）
++agent.tool_plain(tools.save_learning_log, requires_approval=True)
+ 
+-# TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
++# Límite de rondas de aprobación por pregunta. Lo cuenta el harness, no el modelo (Clase 3, Parte 7)
++MAX_APPROVAL_ROUNDS = 3
+ 
+ # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
+ MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
+@@ -97,8 +108,11 @@ def print_tools(target: Agent) -> None:
+         print(f"  引数: {json.dumps(params, ensure_ascii=False)}")
+ 
+ 
+-def print_trace(result) -> None:
+-    """どのツールが、どの引数で呼ばれ、何を返したかを表示する。"""
++def print_trace(result, usage=None) -> None:
++    """どのツールが、どの引数で呼ばれ、何を返したかを表示する。
++
++    usage: 承認をはさんで run_sync を複数回呼んだときの合計（省略時は最後の実行分）。
++    """
+     print("\n--- trace ---")
+     for message in result.all_messages():
+         for part in message.parts:
+@@ -106,7 +120,86 @@ def print_trace(result) -> None:
+                 print(f"[tool call]   {part.tool_name}({part.args})")
+             elif isinstance(part, ToolReturnPart):
+                 print(f"[tool return] {part.tool_name} -> {str(part.content)[:120]}…")
+-    print(f"[usage] {result.usage}")
++    print(f"[usage] {usage if usage is not None else result.usage}")
++
++
++# --- 宿題（実装）: 承認（human-in-the-loop）--------------------------------------
++
++Decision = bool | ToolDenied  # True = aprobar; ToolDenied(mensaje) = rechazar y decir por qué al modelo
++Approver = Callable[[ToolCallPart], Decision]
++
++
++@dataclass
++class RunOutcome:
++    result: object  # AgentRunResult del último run_sync (all_messages() contiene toda la conversación)
++    usage: object  # RunUsage sumado de todas las llamadas
++    approval_rounds: int
++    stopped_by_limit: bool
++
++
++def describe_call(call: ToolCallPart) -> str:
++    """Texto que ve la persona antes de aprobar: el archivo y el contenido EXACTOS que se escribirán."""
++    args = call.args_as_dict()
++    if call.tool_name == "save_learning_log":
++        entry = tools.prepare_learning_log(**args)  # ValueError si los argumentos no son válidos
++        return (
++            f"保存先: {tools._display_path(entry.path)}\n"
++            f"---- 保存される内容 ----\n{entry.markdown}------------------------"
++        )
++    return f"{call.tool_name}({json.dumps(args, ensure_ascii=False)})"
++
++
++def cli_approver(call: ToolCallPart, input_fn: Callable[[str], str] = input, interactive: bool | None = None) -> Decision:
++    """Pregunta en la terminal. Por defecto NO (solo 'y' / 'yes' / 'はい' aprueban)."""
++    print(f"\n[承認待ち] ツール {call.tool_name} を実行しようとしています。")
++    try:
++        print(describe_call(call))
++    except (TypeError, ValueError) as e:
++        # Argumentos inválidos: no tiene sentido pedir aprobación; se rechaza y el modelo recibe el motivo
++        print(f"[承認待ち] 引数が不正なので自動で拒否します: {e}")
++        return ToolDenied(f"引数が不正なため実行していません: {e}")
++    if interactive is None:
++        interactive = sys.stdin.isatty()
++    if not interactive:
++        # Sin persona delante (CI, tubería): nunca aprobar en silencio
++        print("[承認待ち] 対話できない環境なので自動で拒否します。")
++        return ToolDenied("対話できない環境のため、利用者の承認が得られず実行していません。")
++    try:
++        answer = input_fn("実行してよいですか？ [y/N]: ").strip().casefold()
++    except (EOFError, KeyboardInterrupt):  # Ctrl-D / Ctrl-C = no (fallar hacia lo seguro)
++        print()
++        answer = ""
++    if answer in {"y", "yes", "はい"}:
++        return True
++    return ToolDenied("利用者が実行を拒否しました。保存などの操作は行われていません。")
++
++
++def run_with_approval(target: Agent, question: str, model, approver: Approver = cli_approver,
++                      max_rounds: int = MAX_APPROVAL_ROUNDS) -> RunOutcome:
++    """Bucle del harness: ejecutar → si hay herramientas pendientes de aprobación, preguntar →
++    reanudar con el historial + las decisiones. Termina cuando la salida es texto o se alcanza el límite."""
++    result = target.run_sync(question, model=model)
++    usage = result.usage
++    rounds = 0
++    while isinstance(result.output, DeferredToolRequests):
++        if rounds >= max_rounds:
++            return RunOutcome(result, usage, rounds, stopped_by_limit=True)
++        if result.output.calls:
++            # Herramientas externas (no se usan en este curso): no sabemos ejecutarlas aquí
++            raise RuntimeError(f"未対応の外部ツール呼び出し: {[c.tool_name for c in result.output.calls]}")
++        rounds += 1
++        decisions = DeferredToolResults(
++            approvals={call.tool_call_id: approver(call) for call in result.output.approvals}
++        )
++        result = target.run_sync(
++            message_history=result.all_messages(), deferred_tool_results=decisions, model=model
++        )
++        usage = usage + result.usage  # cada run_sync cuenta solo sus propias llamadas
++    return RunOutcome(result, usage, rounds, stopped_by_limit=False)
++
++
++def snapshot_logs() -> set[Path]:
++    return set(tools.LEARNING_LOG_DIR.glob("*.md")) if tools.LEARNING_LOG_DIR.exists() else set()
+ 
+ 
+ def main() -> None:
+@@ -127,14 +220,26 @@ def main() -> None:
+     print(f"[model] {MODEL}")
+     if args.mcp:
+         print("[tools] MCP サーバー（app/mcp_servers.json）")
++    before = snapshot_logs()
+     try:
+-        result = target.run_sync(args.question, model=build_model())
++        outcome = run_with_approval(target, args.question, build_model())
+     except ModelHTTPError as e:
+         print(api_error_message(e.status_code, str(e.body)[:200]))
+         raise SystemExit(1)
+-    print(result.output)
++    if outcome.stopped_by_limit:
++        print(f"[停止] 承認待ちが {MAX_APPROVAL_ROUNDS} 回を超えたので止めました（未実行のツールがあります）。")
++    else:
++        print(outcome.result.output)
++
++    # Comprobar el resultado por el ESTADO (archivos), no por lo que dice el modelo (Clase 3, Parte 7)
++    created = sorted(snapshot_logs() - before)
++    if created:
++        print("\n[verify] 新しく保存されたファイル: " + ", ".join(tools._display_path(p) for p in created))
++    elif outcome.approval_rounds:
++        print("\n[verify] learning_log/ に新しいファイルはありません")
+     if args.trace:
+-        print_trace(result)
++        print(f"[approval rounds] {outcome.approval_rounds}")
++        print_trace(outcome.result, outcome.usage)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/app/tools.py b/app/tools.py
+index 3534427..323df31 100644
+--- a/app/tools.py
++++ b/app/tools.py
+@@ -4,13 +4,29 @@
+ 説明文を書き換えると、モデルがツールを使うかどうか・どんな引数で呼ぶかが変わる。
+ """
+ 
++import hashlib
+ import json
++import os
++import random
++import re
++import unicodedata
++from dataclasses import dataclass
++from datetime import datetime
+ from functools import cache
+ from pathlib import Path
+ 
+-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
++REPO_ROOT = Path(__file__).resolve().parent.parent
++DATA_DIR = REPO_ROOT / "data"
+ MAX_RESULTS = 3
+ 
++# --- 宿題（実装）: save_learning_log の設定 ---------------------------------
++# Carpeta de destino. La decide el CÓDIGO, nunca el modelo (frontera de confianza, Clase 3 Parte 9).
++# Se puede cambiar con la variable de entorno (los tests usan una carpeta temporal).
++LEARNING_LOG_DIR = Path(os.getenv("AIE_LEARNING_LOG_DIR", REPO_ROOT / "learning_log"))
++MAX_TITLE_CHARS = 80
++MAX_CONTENT_CHARS = 2000
++MAX_LECTURE = 13  # el curso tiene 13 sesiones; 0 = sin sesión concreta
++
+ 
+ @cache
+ def load_glossary() -> list[dict]:
+@@ -77,3 +93,135 @@ def get_lecture_summary(lecture: int) -> str:
+         available = sorted(p.stem for p in (DATA_DIR / "lectures").glob("*.md"))
+         return f"第{lecture}回の要点はまだありません。用意されている回: {', '.join(available)}"
+     return path.read_text(encoding="utf-8")
++
++
++# --- 第3回 演習: make_quiz ---------------------------------------------------
++
++
++def make_quiz(lecture: int) -> str:
++    """指定した回（1始まりの整数）の用語を1つ選び、確認問題とその答えを返す。
++
++    「第2回の確認問題を出して」のように、復習用の問題を求められたときに使う。
++    """
++    terms = [t for t in load_glossary() if t["lecture"] == lecture]
++    if not terms:
++        available = sorted({t["lecture"] for t in load_glossary()})
++        return f"第{lecture}回の用語は用語集にありません。問題を作れる回: {', '.join(map(str, available))}"
++    term = random.choice(terms)
++    return json.dumps(
++        {"question": f"「{term['term']}」の意味は？", "answer": term["definition"], "lecture": lecture},
++        ensure_ascii=False,
++    )
++
++
++# --- 宿題（実装）: save_learning_log ------------------------------------------
++
++
++@dataclass(frozen=True)
++class LearningLogEntry:
++    """Lo que se va a escribir y dónde. Se calcula ANTES de pedir aprobación,
++    para que la persona apruebe exactamente el archivo y el contenido finales."""
++
++    entry_id: str
++    title: str
++    content: str
++    lecture: int
++    path: Path
++    markdown: str
++
++
++def _slugify(text: str, max_len: int = 40) -> str:
++    """Nombre de archivo seguro: solo letras/números (incluye japonés) y guiones.
++    Elimina '/', '..', espacios, etc., así el modelo no puede elegir la ruta."""
++    text = unicodedata.normalize("NFKC", text)
++    slug = re.sub(r"[^\w]+", "-", text, flags=re.UNICODE).strip("-_")
++    return slug[:max_len] or "log"
++
++
++def prepare_learning_log(title: str, content: str, lecture: int, now: datetime | None = None) -> LearningLogEntry:
++    """Valida los argumentos y construye la entrada. Lanza ValueError si algo no es válido.
++
++    La usan tanto la herramienta (al ejecutar) como el CLI (al mostrar la vista previa de aprobación).
++    """
++    title = (title or "").strip()
++    content = (content or "").strip()
++    if not title:
++        raise ValueError("title が空です")
++    if not content:
++        raise ValueError("content が空です")
++    if len(title) > MAX_TITLE_CHARS:
++        raise ValueError(f"title は{MAX_TITLE_CHARS}文字以内にしてください（{len(title)}文字）")
++    if len(content) > MAX_CONTENT_CHARS:
++        raise ValueError(f"content は{MAX_CONTENT_CHARS}文字以内にしてください（{len(content)}文字）")
++    if isinstance(lecture, bool) or not isinstance(lecture, int) or not 0 <= lecture <= MAX_LECTURE:
++        raise ValueError(f"lecture は0〜{MAX_LECTURE}の整数にしてください（{lecture!r}）")
++
++    # Clave de idempotencia: mismo contenido → mismo id → no se guarda dos veces (Clase 3, Partes 4 y 7)
++    entry_id = hashlib.sha256(f"{lecture}\n{title}\n{content}".encode("utf-8")).hexdigest()[:12]
++    now = now or datetime.now().astimezone()
++    base = LEARNING_LOG_DIR.resolve()
++    path = (base / f"{now:%Y-%m-%d}_{_slugify(title)}_{entry_id}.md").resolve()
++    if path.parent != base:  # defensa en profundidad: nunca fuera de learning_log/
++        raise ValueError("保存先が learning_log/ の外になります")
++
++    markdown = (
++        "---\n"
++        f"id: {entry_id}\n"
++        f"title: {json.dumps(title, ensure_ascii=False)}\n"
++        f"lecture: {lecture}\n"
++        f"created_at: {now.isoformat(timespec='seconds')}\n"
++        "saved_by: save_learning_log (利用者の承認あり)\n"
++        "---\n\n"
++        f"# {title}\n\n{content}\n"
++    )
++    return LearningLogEntry(entry_id, title, content, lecture, path, markdown)
++
++
++def find_existing_log(entry_id: str) -> Path | None:
++    """Busca si ya existe un registro con el mismo id (en cualquier fecha)."""
++    if not LEARNING_LOG_DIR.exists():
++        return None
++    return next(iter(sorted(LEARNING_LOG_DIR.glob(f"*_{entry_id}.md"))), None)
++
++
++def _display_path(path: Path) -> str:
++    try:
++        return str(path.relative_to(REPO_ROOT))
++    except ValueError:
++        return str(path)
++
++
++def save_learning_log(title: str, content: str, lecture: int) -> str:
++    """学習の記録（学んだこと・気づき・疑問など）を learning_log/ フォルダに Markdown ファイルとして保存する。
++
++    利用者が「記録して」「保存して」「学習ログに残して」のように、保存をはっきり頼んだときだけ使う。
++    保存は取り消しにくい操作なので、実行前に利用者の承認を求める。承認されなければ保存されない。
++    title: 記録の見出し（80文字以内）。
++    content: 記録の本文（2000文字以内）。利用者が話した内容をもとにまとめ、推測で事実を足さない。
++    lecture: 関係する回（1〜13の整数）。特定の回がなければ 0。
++    """
++    try:
++        entry = prepare_learning_log(title, content, lecture)
++    except ValueError as e:
++        # No se lanza la excepción: se devuelve el motivo para que el modelo lo corrija o lo informe
++        return json.dumps({"saved": False, "reason": str(e)}, ensure_ascii=False)
++
++    existing = find_existing_log(entry.entry_id)
++    if existing:
++        # Reintento tras un corte, o la misma petición dos veces: devolver el resultado registrado
++        return json.dumps(
++            {"saved": False, "already_exists": True, "path": _display_path(existing)}, ensure_ascii=False
++        )
++
++    entry.path.parent.mkdir(parents=True, exist_ok=True)
++    try:
++        # Modo "x": creación exclusiva. Si otro proceso lo creó entre medias, no se sobrescribe
++        with open(entry.path, "x", encoding="utf-8") as f:
++            f.write(entry.markdown)
++    except FileExistsError:
++        return json.dumps(
++            {"saved": False, "already_exists": True, "path": _display_path(entry.path)}, ensure_ascii=False
++        )
++    return json.dumps(
++        {"saved": True, "path": _display_path(entry.path), "id": entry.entry_id}, ensure_ascii=False
++    )
+diff --git a/tests/test_learning_log.py b/tests/test_learning_log.py
+new file mode 100644
+index 0000000..5c320ec
+--- /dev/null
++++ b/tests/test_learning_log.py
+@@ -0,0 +1,152 @@
++"""宿題（実装）: save_learning_log と承認フローのテスト（LLM・APIキーは使わない）。
++
++TestModel は登録されたツールを呼ぶ偽モデル。承認が必要なツールは実行されずに
++DeferredToolRequests で止まるので、「承認 → 保存」「拒否 → 保存しない」をAPIなしで確かめられる。
++"""
++
++import json
++from datetime import datetime
++
++import pytest
++from pydantic_ai import ToolDenied
++from pydantic_ai.messages import ToolCallPart, ToolReturnPart
++from pydantic_ai.models.test import TestModel
++
++from app import agent as agent_module
++from app import tools
++
++
++@pytest.fixture(autouse=True)
++def tmp_log_dir(tmp_path, monkeypatch):
++    """Cada test escribe en una carpeta temporal, nunca en learning_log/ del repo."""
++    log_dir = tmp_path / "learning_log"
++    monkeypatch.setattr(tools, "LEARNING_LOG_DIR", log_dir)
++    return log_dir
++
++
++# --- herramienta: validación, ruta, idempotencia --------------------------------
++
++
++def test_save_creates_markdown_file(tmp_log_dir):
++    out = json.loads(tools.save_learning_log("LoRAの復習", "Aは小さく、Bはゼロで初期化する。", 2))
++    assert out["saved"] is True
++    files = list(tmp_log_dir.glob("*.md"))
++    assert len(files) == 1
++    text = files[0].read_text(encoding="utf-8")
++    assert "lecture: 2" in text and "# LoRAの復習" in text and "Bはゼロ" in text
++
++
++def test_same_content_is_saved_only_once(tmp_log_dir):
++    """Reintento (p. ej., tras un corte de conexión) → no se duplica: idempotencia."""
++    first = json.loads(tools.save_learning_log("同じ記録", "本文", 3))
++    second = json.loads(tools.save_learning_log("同じ記録", "本文", 3))
++    assert first["saved"] is True
++    assert second["saved"] is False and second["already_exists"] is True
++    assert len(list(tmp_log_dir.glob("*.md"))) == 1
++
++
++@pytest.mark.parametrize("title", ["../../etc/passwd", "/tmp/evil", "..\\..\\x", "a/b/c"])
++def test_title_cannot_escape_log_dir(tmp_log_dir, title):
++    """El título lo escribe el modelo: no debe poder elegir la ruta (frontera de confianza)."""
++    out = json.loads(tools.save_learning_log(title, "本文", 1))
++    assert out["saved"] is True
++    for f in tmp_log_dir.parent.rglob("*.md"):
++        assert f.parent == tmp_log_dir
++
++
++@pytest.mark.parametrize(
++    "title,content,lecture",
++    [("", "本文", 1), ("題", "   ", 1), ("x" * 81, "本文", 1), ("題", "x" * 2001, 1), ("題", "本文", 14), ("題", "本文", -1)],
++)
++def test_invalid_arguments_are_rejected_without_writing(tmp_log_dir, title, content, lecture):
++    out = json.loads(tools.save_learning_log(title, content, lecture))
++    assert out["saved"] is False and out["reason"]
++    assert not tmp_log_dir.exists() or not list(tmp_log_dir.iterdir())
++
++
++def test_prepare_is_deterministic():
++    """Mismo contenido → mismo id; lo que se aprueba es exactamente lo que se escribe."""
++    now = datetime(2026, 11, 16, 10, 0)
++    a = tools.prepare_learning_log("題", "本文", 3, now=now)
++    b = tools.prepare_learning_log("題", "本文", 3, now=now)
++    assert a == b and a.path.name.startswith("2026-11-16_")
++
++
++def test_make_quiz_handles_missing_lecture():
++    assert "ありません" in tools.make_quiz(0)
++    q = json.loads(tools.make_quiz(2))
++    assert q["question"] and q["answer"]
++
++
++# --- flujo de aprobación con el agente real (modelo falso) ------------------------
++
++
++def _run(approver):
++    model = TestModel(call_tools=["save_learning_log"], custom_output_text="完了")
++    return agent_module.run_with_approval(agent_module.agent, "学習ログに保存して", model, approver=approver)
++
++
++def test_tool_waits_for_approval_and_does_not_run_before(tmp_log_dir):
++    seen = []
++
++    def approver(call: ToolCallPart):
++        seen.append(call.tool_name)
++        assert not tmp_log_dir.exists() or not list(tmp_log_dir.iterdir())  # todavía no se escribió nada
++        return True
++
++    _run(approver)
++    assert seen == ["save_learning_log"]
++
++
++def test_approved_call_writes_file(tmp_log_dir):
++    outcome = _run(lambda call: True)
++    assert outcome.approval_rounds == 1 and not outcome.stopped_by_limit
++    assert len(list(tmp_log_dir.glob("*.md"))) == 1
++    returns = [p for m in outcome.result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
++    assert any(p.tool_name == "save_learning_log" and '"saved": true' in str(p.content) for p in returns)
++    assert outcome.usage.requests >= 2  # la pausa de aprobación cuesta una llamada extra al LLM
++
++
++def test_denied_call_writes_nothing_and_model_is_told(tmp_log_dir):
++    outcome = _run(lambda call: ToolDenied("利用者が拒否"))
++    assert not tmp_log_dir.exists() or not list(tmp_log_dir.iterdir())
++    returns = [p for m in outcome.result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
++    assert any("利用者が拒否" in str(p.content) for p in returns)
++
++
++def test_cli_approver_defaults_to_no():
++    call = ToolCallPart("save_learning_log", {"title": "題", "content": "本文", "lecture": 1})
++    assert isinstance(agent_module.cli_approver(call, input_fn=lambda _: "", interactive=True), ToolDenied)
++    assert isinstance(agent_module.cli_approver(call, input_fn=lambda _: "n", interactive=True), ToolDenied)
++    assert agent_module.cli_approver(call, input_fn=lambda _: "y", interactive=True) is True
++
++
++def test_cli_approver_denies_when_not_interactive():
++    call = ToolCallPart("save_learning_log", {"title": "題", "content": "本文", "lecture": 1})
++    assert isinstance(agent_module.cli_approver(call, interactive=False), ToolDenied)
++
++
++def test_cli_approver_rejects_invalid_args_without_asking():
++    call = ToolCallPart("save_learning_log", {"title": "", "content": "本文", "lecture": 1})
++
++    def must_not_ask(_):
++        raise AssertionError("no se debe pedir aprobación para argumentos inválidos")
++
++    assert isinstance(agent_module.cli_approver(call, input_fn=must_not_ask, interactive=True), ToolDenied)
++
++
++def test_approval_rounds_are_capped(monkeypatch):
++    """Si el modelo pidiera aprobación sin fin, el harness corta (condición de parada externa)."""
++    outcome = agent_module.run_with_approval(
++        agent_module.agent, "保存して", TestModel(call_tools=["save_learning_log"]),
++        approver=lambda call: True, max_rounds=0,
++    )
++    assert outcome.stopped_by_limit
++
++
++def test_cli_approver_treats_ctrl_c_and_ctrl_d_as_no():
++    call = ToolCallPart("save_learning_log", {"title": "題", "content": "本文", "lecture": 1})
++    for exc in (EOFError, KeyboardInterrupt):
++        def boom(_, exc=exc):
++            raise exc
++        assert isinstance(agent_module.cli_approver(call, input_fn=boom, interactive=True), ToolDenied)
