@@ -301,15 +301,102 @@ def compare_labels(a: dict[str, dict], b: dict[str, dict], name_a: str, name_b: 
 
 
 # ---------------------------------------------------------------- 回答の生成（宿題・実装）
-def generate_answers(cases: list[dict], wait: float = 1.0) -> list[dict]:
-    """評価セットの各質問を自分のエージェント（app.agent）に投げ、回答を埋める。"""
-    from app.agent import agent, build_model
+# Cambios respecto a la versión del curso (宿題・実装, 第4回):
+# 1. Mi agente del 第3回 tiene output_type=[str, DeferredToolRequests]. Si una pregunta pide guardar,
+#    run_sync devuelve DeferredToolRequests y la versión original guardaba su repr como "respuesta".
+#    Aquí se usa el mismo bucle de aprobación del CLI (run_with_approval) y TODA aprobación se rechaza:
+#    en un lote no hay persona delante (igual que cli_approver sin terminal).
+# 2. Se guarda la traza (herramientas pedidas, aprobaciones, archivos creados, requests) en case["trace"].
+#    El juez LLM solo ve el texto; lo que la agente HIZO se comprueba por código (app/eval_checks.py).
+# 3. learning_log/ se redirige a una carpeta temporal durante la generación: evaluar nunca escribe en la real.
+# 4. Reintentos con espera ante 429/503 y guardado tras cada caso, para no perder lo ya generado.
 
-    model = build_model()
+RETRYABLE_STATUS = {429, 503}
+DENY_MESSAGE = "評価の実行中のため、利用者の承認は得られず実行していません。保存などの操作は行われていません。"
+
+
+def extract_trace(outcome, approvals_requested: list[str], files_created: int, elapsed_s: float) -> dict:
+    """RunOutcome (app.agent) → dict serializable con lo que hizo la agente (no lo que dijo)."""
+    tool_calls = []
+    for message in outcome.result.all_messages():
+        for part in message.parts:
+            if isinstance(part, ToolCallPart):
+                tool_calls.append({"tool": part.tool_name, "args": part.args_as_dict()})
+    usage = outcome.usage
+    return {
+        "tool_calls": tool_calls,
+        "approvals_requested": approvals_requested,
+        "approval_rounds": outcome.approval_rounds,
+        "stopped_by_limit": outcome.stopped_by_limit,
+        "files_created": files_created,
+        "requests": getattr(usage, "requests", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "elapsed_s": round(elapsed_s, 2),
+    }
+
+
+def answer_one(question: str, model, target=None) -> tuple[str, dict]:
+    """Responde 1 pregunta con la agente del 第3回 y devuelve (texto, traza). Sin persona: rechaza aprobaciones."""
+    import tempfile
+
+    from pydantic_ai import ToolDenied
+
+    from app import agent as agent_module
+
+    target = target or agent_module.agent
+    requested: list[str] = []
+
+    def deny_during_eval(call: ToolCallPart):
+        requested.append(call.tool_name)
+        return ToolDenied(DENY_MESSAGE)
+
+    original_dir = tools.LEARNING_LOG_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        tools.LEARNING_LOG_DIR = Path(tmp) / "learning_log"  # nunca la carpeta real durante la evaluación
+        try:
+            before = agent_module.snapshot_logs()
+            start = time.monotonic()
+            outcome = agent_module.run_with_approval(target, question, model, approver=deny_during_eval)
+            elapsed = time.monotonic() - start
+            created = len(agent_module.snapshot_logs() - before)  # estado, no palabras (第3回 Parte 7)
+        finally:
+            tools.LEARNING_LOG_DIR = original_dir
+
+    output = outcome.result.output
+    if outcome.stopped_by_limit or not isinstance(output, str):
+        text = "（エージェントが承認待ちのまま止まり、回答を返しませんでした）"
+    else:
+        text = output
+    return text, extract_trace(outcome, requested, created, elapsed)
+
+
+def generate_answers(cases: list[dict], wait: float = 1.0, model=None, out_path: Path | None = None,
+                     retries: int = 3, backoff_s: float = 30.0) -> list[dict]:
+    """評価セットの各質問を自分のエージェント（app.agent）に投げ、回答とトレースを埋める。
+
+    model: None なら app.agent.build_model()（Gemini）。テストでは TestModel を渡す。
+    out_path: 指定すると 1 件ごとに保存する（途中でレート制限に当たっても、それまでの回答は残る）。
+    """
+    if model is None:
+        from app.agent import build_model
+
+        model = build_model()
     print(f"回答を生成中 {len(cases)} 件 ", end="", flush=True)
     for case in cases:
-        result = agent.run_sync(case["question"], model=model)
-        case["answer"] = str(result.output)
+        for attempt in range(retries + 1):
+            try:
+                case["answer"], case["trace"] = answer_one(case["question"], model)
+                break
+            except ModelHTTPError as e:
+                if e.status_code not in RETRYABLE_STATUS or attempt == retries:
+                    if out_path:
+                        write_jsonl(out_path, cases)  # conservar lo generado hasta aquí
+                    raise
+                print(f"[{e.status_code}: {backoff_s * (attempt + 1):.0f}s 待って再試行]", end="", flush=True)
+                time.sleep(backoff_s * (attempt + 1))
+        if out_path:
+            write_jsonl(out_path, cases)
         print(".", end="", flush=True)
         time.sleep(wait)
     print()
@@ -343,7 +430,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.generate:
         try:
-            cases = generate_answers(cases)
+            cases = generate_answers(cases, wait=max(args.wait, 1.0), out_path=args.cases)
         except ModelHTTPError as e:
             print(api_error_message(e.status_code, str(e.body)[:200]))
             raise SystemExit(1)
